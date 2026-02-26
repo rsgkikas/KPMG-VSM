@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 
 # ==========================================
-# 1. FUNÇÕES AUXILIARES E CORES
+# 1. FUNÇÕES AUXILIARES E CONFIGURAÇÃO
 # ==========================================
 
 def arredondar_quarteirao(n):
@@ -16,165 +16,179 @@ def arredondar_quarteirao(n):
     return math.ceil(n * 4) / 4
 
 
-# Cores Corporativas
+def extrair_dados_inteligente(df):
+    colunas = df.columns.tolist()
+    chaves_nome = ['atividade', 'operação', 'operacao', 'nome', 'task', 'descrição', 'processo']
+    chaves_tempo = ['tempo', 'ciclo', 'minutos', 'segundos', 'duration', 'cycle', 't.c', 'tc']
+    chaves_precedencia = ['precedência', 'precedencia', 'antecessora', 'dependência', 'dependencia', 'precedent']
+
+    col_nome, col_tempo, col_precedencia = None, None, None
+    for c in colunas:
+        c_low = str(c).lower()
+        if not col_nome and any(k in c_low for k in chaves_nome): col_nome = c
+        if not col_tempo and any(k in c_low for k in chaves_tempo): col_tempo = c
+        if not col_precedencia and any(k in c_low for k in chaves_precedencia): col_precedencia = c
+    if not col_nome: col_nome = colunas[0]
+    if not col_tempo: col_tempo = colunas[1] if len(colunas) > 1 else colunas[0]
+    return col_nome, col_tempo, col_precedencia
+
+
+def calcular_cronograma(df):
+    tempos_ciclo = dict(zip(df['Atividade'], df['Tempo Ciclo (min)']))
+    precedencias = dict(zip(df['Atividade'], df['Precedência']))
+    tempos_fim = {}
+    atividades_processadas = []
+    lista_para_processar = df['Atividade'].tolist()
+    max_iter = len(lista_para_processar) * 2
+    iterações = 0
+    while len(atividades_processadas) < len(lista_para_processar) and iterações < max_iter:
+        progresso = False
+        for atividade in lista_para_processar:
+            if atividade not in atividades_processadas:
+                deps = precedencias.get(atividade, [])
+                deps_validas = [d for d in deps if d in tempos_ciclo]
+                if not deps_validas or all(d in tempos_fim for d in deps_validas):
+                    inicio = max([tempos_fim[d] for d in deps_validas], default=0)
+                    tempos_fim[atividade] = inicio + tempos_ciclo[atividade]
+                    atividades_processadas.append(atividade)
+                    progresso = True
+        iterações += 1
+        if not progresso: break
+    return tempos_fim
+
+
+# Cores KPMG
 AZUL_KPMG = '#00338D'
 VERMELHO_KPMG = '#E30513'
 PRETO = '#000000'
 BRANCO = '#FFFFFF'
 
 st.set_page_config(page_title="KPMG VSM Tool", layout="wide")
-
-# Espaçamento do Título
-st.markdown('<h1 style="margin-bottom: 50px;">📂 KPMG VSM Tool</h1>', unsafe_allow_html=True)
-st.markdown("---")
+st.markdown('<h1 style="margin-bottom: 40px;">📂 KPMG VSM Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. SIDEBAR E INPUTS
+# 2. SIDEBAR E ESTADO
 # ==========================================
-
 st.sidebar.header("⚙️ Parâmetros de Produção")
 vol_alvo = st.sidebar.number_input("Volume Alvo (Unidades/Dia)", min_value=1, value=100)
 tempo_disp = st.sidebar.number_input("Tempo Disponível (min/Dia)", min_value=1, value=480)
 
 if 'df_tarefas' not in st.session_state:
-    st.session_state.df_tarefas = pd.DataFrame(
-        [{"Atividade": "", "Tempo Ciclo (min)": 0.0, "Precedência": []}]
-    )
+    st.session_state.df_tarefas = pd.DataFrame([{"Atividade": "", "Tempo Ciclo (min)": 0.0, "Precedência": []}])
 
-st.subheader("📝 Configuração de Sequenciamento e Tempos")
-opcoes_validas = [a for a in st.session_state.df_tarefas["Atividade"].tolist() if a and a.strip()]
+# ==========================================
+# 3. ENTRADA DE DADOS
+# ==========================================
+metodo = st.radio("Como pretende carregar os dados?", ["Manual", "Excel"], horizontal=True)
+
+if metodo == "Excel":
+    upload_file = st.file_uploader("Carregue o Excel", type=["xlsx"])
+    if upload_file:
+        try:
+            df_bruto = pd.read_excel(upload_file)
+            col_id_nome, col_id_tempo, col_id_prec = extrair_dados_inteligente(df_bruto)
+            if col_id_prec:
+                prec_data = df_bruto[col_id_prec].apply(
+                    lambda x: [i.strip() for i in str(x).split(',')] if pd.notnull(x) and str(x).strip() != "" and str(
+                        x).lower() != 'nan' else [])
+            else:
+                prec_data = [[]] * len(df_bruto)
+            st.session_state.df_tarefas = pd.DataFrame({
+                "Atividade": df_bruto[col_id_nome].astype(str),
+                "Tempo Ciclo (min)": pd.to_numeric(df_bruto[col_id_tempo], errors='coerce').fillna(0.0),
+                "Precedência": prec_data
+            })
+            st.success("🤖 IA: Colunas mapeadas!")
+        except Exception as e:
+            st.error(f"Erro: {e}")
+
+st.markdown("---")
+
+# ==========================================
+# 4. TABELA E BOTÕES (DEFINIÇÃO DE 'CALCULAR')
+# ==========================================
+st.subheader("📝 Edição e Precedências")
+opcoes_validas = [a for a in st.session_state.df_tarefas["Atividade"].tolist() if a and str(a).strip()]
 
 df_editado = st.data_editor(
     st.session_state.df_tarefas,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Atividade": st.column_config.TextColumn("Nome da Operação", required=True),
-        "Tempo Ciclo (min)": st.column_config.NumberColumn("T.C. (min)", min_value=0.001, format="%.3f"),
+        "Atividade": st.column_config.TextColumn("Operação", required=True),
+        "Tempo Ciclo (min)": st.column_config.NumberColumn("T.C. (min)", format="%.3f"),
         "Precedência": st.column_config.MultiselectColumn("Precedência", options=opcoes_validas)
     },
-    key="vsm_editor_v5"
+    key="vsm_editor_final"
 )
 
-col_btn1, col_btn2, col_btn3 = st.columns([1.5, 1.5, 4])
+# Sincronização imediata
+st.session_state.df_tarefas = df_editado
+
+col_btn1, col_btn2 = st.columns([1, 5])
 with col_btn1:
-    if st.button("💾 Atualizar Lista"):
-        st.session_state.df_tarefas = df_editado
-        st.rerun()
-with col_btn2:
+    # AQUI É DEFINIDA A VARIÁVEL 'calcular'
     calcular = st.button("🚀 Calcular")
-with col_btn3:
-    if st.button("🗑️ Limpar Tabela"):
+with col_btn2:
+    if st.button("🗑️ Reset"):
         st.session_state.df_tarefas = pd.DataFrame([{"Atividade": "", "Tempo Ciclo (min)": 0.0, "Precedência": []}])
         st.rerun()
 
 # ==========================================
-# 3. GANTT E PROCESSAMENTO
+# 5. RESULTADOS (USO DE 'CALCULAR')
 # ==========================================
-
 if calcular:
-    df_v = df_editado[df_editado["Atividade"].str.strip() != ""].copy()
+    df_v = st.session_state.df_tarefas[st.session_state.df_tarefas["Atividade"].astype(str).str.strip() != ""].copy()
 
     if not df_v.empty:
-        # --- GANTT ILUSTRATIVO ---
-        st.subheader("📅 Gantt Ilustrativo")
+        tempos_fim_calculados = calcular_cronograma(df_v)
 
-        gantt_data = []
-        tempos_fim = {}
-
-        # Ordenação simples para o Gantt respeitar a lógica de fluxo
-        for _, row in df_v.iterrows():
-            nome = row['Atividade']
-            duracao = row['Tempo Ciclo (min)']
-            precedencias = row['Precedência']
-
-            inicio = 0
-            if precedencias:
-                inicio = max([tempos_fim.get(p, 0) for p in precedencias], default=0)
-
-            fim = inicio + duracao
-            tempos_fim[nome] = fim
-
-            base = datetime(2026, 1, 1, 8, 0)
-            gantt_data.append(dict(
-                Task=nome,
-                Start=base + timedelta(minutes=inicio),
-                Finish=base + timedelta(minutes=fim)
-            ))
-
-        df_gantt = pd.DataFrame(gantt_data)
-        fig_gantt = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
-                                color_discrete_sequence=[AZUL_KPMG])
-        fig_gantt.update_yaxes(autorange="reversed")
-        fig_gantt.update_layout(
-            title="Sequenciamento Lógico de Operações",
-            template="plotly_white",
-            xaxis_title="Tempo Decorrido (HH:MM)"
-        )
-        st.plotly_chart(fig_gantt, use_container_width=True)
-
-        # --- CÁLCULOS TÉCNICOS ---
+        # Cálculos de FTE e Output
         df_v['FTE_Teorico'] = (df_v['Tempo Ciclo (min)'] * vol_alvo) / tempo_disp
         df_v['FTE_Real'] = df_v['FTE_Teorico'].apply(arredondar_quarteirao)
         df_v['Output_Real'] = (tempo_disp * df_v['FTE_Real']) / df_v['Tempo Ciclo (min)']
 
-        st.markdown("---")
+        # Métricas para os Cards
+        lt_total = max(tempos_fim_calculados.values()) if tempos_fim_calculados else 0
+        fte_total = df_v['FTE_Real'].sum()
 
-        # --- GRÁFICO DE BALANCEAMENTO ---
+        # --- CARDS PEQUENOS LADO A LADO ---
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"""<div style="background-color:{AZUL_KPMG}; padding:20px; border-radius:10px; text-align:center;">
+                <p style="color:white; margin:0; font-size:16px;">⏱️ Lead Time Total</p>
+                <h2 style="color:white; margin:0; font-size:32px;">{lt_total:.2f} min</h2>
+            </div>""", unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"""<div style="background-color:{AZUL_KPMG}; padding:20px; border-radius:10px; text-align:center;">
+                <p style="color:white; margin:0; font-size:16px;">👥 Total FTE Necessário</p>
+                <h2 style="color:white; margin:0; font-size:32px;">{fte_total:.2f}</h2>
+            </div>""", unsafe_allow_html=True)
+
+        # --- GANTT ---
+        st.write("")
+        st.subheader("📅 Gantt Ilustrativo")
+        gantt_data = []
+        base = datetime(2026, 1, 1, 8, 0)
+        for _, row in df_v.iterrows():
+            f = tempos_fim_calculados.get(row['Atividade'], 0)
+            i = f - row['Tempo Ciclo (min)']
+            gantt_data.append(
+                dict(Task=row['Atividade'], Start=base + timedelta(minutes=i), Finish=base + timedelta(minutes=f)))
+
+        fig_gantt = px.timeline(pd.DataFrame(gantt_data), x_start="Start", x_end="Finish", y="Task",
+                                color_discrete_sequence=[AZUL_KPMG])
+        fig_gantt.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig_gantt, use_container_width=True)
+
+        # --- BALANCEAMENTO ---
+        st.subheader("📊 Balanceamento")
         fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-        # Barras de Output (Eixo Esquerdo)
         fig.add_trace(
-            go.Bar(
-                x=df_v['Atividade'], y=df_v['Output_Real'], name="Output Libertado",
-                marker_color=AZUL_KPMG, opacity=0.7,
-                text=df_v['Output_Real'].map('{:.0f} un'.format), textposition='inside'
-            ),
-            secondary_y=False
-        )
-
-        # Linha FTE (Eixo Direito - Preto Negrito)
-        fig.add_trace(
-            go.Scatter(
-                x=df_v['Atividade'], y=df_v['FTE_Real'], name="Carga FTE",
-                mode='lines+markers+text',
-                marker=dict(size=14, symbol='circle', color=PRETO, line=dict(width=2, color=BRANCO)),
-                text=df_v['FTE_Real'].apply(lambda x: f'<b>FTE: {x:.2f}</b>'),
-                textposition='top center',
-                textfont=dict(color=PRETO, size=13),
-                line=dict(color=PRETO, width=3)
-            ),
-            secondary_y=True
-        )
-
-        # Linha de Meta (Eixo Esquerdo)
-        fig.add_hline(y=vol_alvo, line_dash="dash", line_color=VERMELHO_KPMG,
-                      annotation_text=f"Meta: {vol_alvo} un", secondary_y=False)
-
-        # Layout e Escala Dinâmica
-        max_fte = df_v['FTE_Real'].max()
-        step_fte = 0.25 if max_fte <= 5 else None
-
-        fig.update_layout(
-            title_text="Análise de Produtividade vs Mão de Obra",
-            template="plotly_white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.1, xanchor="center", x=0.5),
-            margin=dict(t=100)
-        )
-
-        fig.update_yaxes(title_text="<b>Output</b> (Unidades/Dia)", secondary_y=False)
-        fig.update_yaxes(
-            title_text="<b>Carga FTE</b> (Escala 0.25)",
-            secondary_y=True, dtick=step_fte, showgrid=False,
-            range=[0, max_fte * 1.4]
-        )
-
+            go.Bar(x=df_v['Atividade'], y=df_v['Output_Real'], name="Output", marker_color=AZUL_KPMG, opacity=0.7),
+            secondary_y=False)
+        fig.add_trace(go.Scatter(x=df_v['Atividade'], y=df_v['FTE_Real'], name="FTE", mode='lines+markers+text',
+                                 marker=dict(size=12, color=PRETO), text=df_v['FTE_Real'].apply(lambda x: f'{x:.2f}')),
+                      secondary_y=True)
+        fig.add_hline(y=vol_alvo, line_dash="dash", line_color=VERMELHO_KPMG)
         st.plotly_chart(fig, use_container_width=True)
-
-        # Tabela de Dados Final
-        st.subheader("📋 Resumo Técnico")
-        st.dataframe(df_v[['Atividade', 'Tempo Ciclo (min)', 'FTE_Teorico', 'FTE_Real', 'Output_Real']],
-                     use_container_width=True)
-
-    else:
-        st.warning("Preencha a tabela e clique em 'Atualizar Lista' primeiro.")
